@@ -13,12 +13,12 @@ import (
 
 var ErrGetFromNullObj = errors.New("get attribute from null object")
 
-func JsonPathLookup(obj interface{}, jpath string) (interface{}, error) {
+func JsonPathLookup(obj interface{}, jpath string, allowMissingKeys bool) (interface{}, error) {
 	c, err := Compile(jpath)
 	if err != nil {
 		return nil, err
 	}
-	return c.Lookup(obj)
+	return c.Lookup(obj, allowMissingKeys)
 }
 
 type Compiled struct {
@@ -67,7 +67,7 @@ func (c *Compiled) String() string {
 	return fmt.Sprintf("Compiled lookup: %s", c.path)
 }
 
-func (c *Compiled) Lookup(obj interface{}) (interface{}, error) {
+func (c *Compiled) Lookup(obj interface{}, allowMissingKeys bool) (interface{}, error) {
 	var (
 		err  error
 		root = obj
@@ -77,14 +77,14 @@ func (c *Compiled) Lookup(obj interface{}) (interface{}, error) {
 		// "key", "idx"
 		switch s.op {
 		case "key":
-			obj, err = get_key(obj, s.key)
+			obj, err = get_key(obj, s.key, allowMissingKeys)
 			if err != nil {
 				return nil, err
 			}
 		case "idx":
 			if len(s.key) > 0 {
 				// no key `$[0].test`
-				obj, err = get_key(obj, s.key)
+				obj, err = get_key(obj, s.key, allowMissingKeys)
 				if err != nil {
 					return nil, err
 				}
@@ -114,7 +114,7 @@ func (c *Compiled) Lookup(obj interface{}) (interface{}, error) {
 		case "range":
 			if len(s.key) > 0 {
 				// no key `$[:1].test`
-				obj, err = get_key(obj, s.key)
+				obj, err = get_key(obj, s.key, allowMissingKeys)
 				if err != nil {
 					return nil, err
 				}
@@ -128,11 +128,11 @@ func (c *Compiled) Lookup(obj interface{}) (interface{}, error) {
 				return nil, fmt.Errorf("range args length should be 2")
 			}
 		case "filter":
-			obj, err = get_key(obj, s.key)
+			obj, err = get_key(obj, s.key, allowMissingKeys)
 			if err != nil {
 				return nil, err
 			}
-			obj, err = get_filtered(obj, root, s.args.(string))
+			obj, err = get_filtered(obj, root, s.args.(string), allowMissingKeys)
 			if err != nil {
 				return nil, err
 			}
@@ -303,7 +303,7 @@ func parse_token(token string) (op string, key string, args interface{}, err err
 	return op, key, args, nil
 }
 
-func filter_get_from_explicit_path(obj interface{}, path string) (interface{}, error) {
+func filter_get_from_explicit_path(obj interface{}, path string, allowMissingKeys bool) (interface{}, error) {
 	steps, err := tokenize(path)
 	//fmt.Println("f: steps: ", steps, err)
 	//fmt.Println(path, steps)
@@ -321,7 +321,7 @@ func filter_get_from_explicit_path(obj interface{}, path string) (interface{}, e
 		// "key", "idx"
 		switch op {
 		case "key":
-			xobj, err = get_key(xobj, key)
+			xobj, err = get_key(xobj, key, allowMissingKeys)
 			if err != nil {
 				return nil, err
 			}
@@ -329,7 +329,7 @@ func filter_get_from_explicit_path(obj interface{}, path string) (interface{}, e
 			if len(args.([]int)) != 1 {
 				return nil, fmt.Errorf("don't support multiple index in filter")
 			}
-			xobj, err = get_key(xobj, key)
+			xobj, err = get_key(xobj, key, allowMissingKeys)
 			if err != nil {
 				return nil, err
 			}
@@ -344,7 +344,7 @@ func filter_get_from_explicit_path(obj interface{}, path string) (interface{}, e
 	return xobj, nil
 }
 
-func get_key(obj interface{}, key string) (interface{}, error) {
+func get_key(obj interface{}, key string, allowMissingKeys bool) (interface{}, error) {
 	if reflect.TypeOf(obj) == nil {
 		return nil, ErrGetFromNullObj
 	}
@@ -356,7 +356,7 @@ func get_key(obj interface{}, key string) (interface{}, error) {
 		// key exists
 		if jsonMap, ok := obj.(map[string]interface{}); ok {
 			val, exists := jsonMap[key]
-			if !exists {
+			if !exists && !allowMissingKeys {
 				return nil, fmt.Errorf("key error: %s not found in object", key)
 			}
 			return val, nil
@@ -376,7 +376,7 @@ func get_key(obj interface{}, key string) (interface{}, error) {
 			if key == "" {
 				res = append(res, tmp)
 			} else {
-				if v, err := get_key(tmp, key); err == nil {
+				if v, err := get_key(tmp, key, allowMissingKeys); err == nil {
 					res = append(res, v)
 				}
 			}
@@ -390,12 +390,12 @@ func get_key(obj interface{}, key string) (interface{}, error) {
 			return nil, fmt.Errorf("null pointer")
 		}
 
-		return get_key(realValue.Interface(), key)
+		return get_key(realValue.Interface(), key, allowMissingKeys)
 	case reflect.Interface:
 		// Unwrap interface value
 		realValue := value.Elem()
 
-		return get_key(realValue.Interface(), key)
+		return get_key(realValue.Interface(), key, allowMissingKeys)
 	case reflect.Struct:
 		for i := 0; i < value.NumField(); i++ {
 			valueField := value.Field(i)
@@ -403,7 +403,7 @@ func get_key(obj interface{}, key string) (interface{}, error) {
 
 			// Embeded struct
 			if valueField.Kind() == reflect.Struct && structField.Anonymous {
-				v, _ := get_key(valueField.Interface(), key)
+				v, _ := get_key(valueField.Interface(), key, allowMissingKeys)
 				if v != nil {
 					return v, nil
 				}
@@ -509,7 +509,7 @@ func regFilterCompile(rule string) (*regexp.Regexp, error) {
 	return regexp.Compile(string(runes))
 }
 
-func get_filtered(obj, root interface{}, filter string) ([]interface{}, error) {
+func get_filtered(obj, root interface{}, filter string, allowMissingKeys bool) ([]interface{}, error) {
 	lp, op, rp, err := parse_filter(filter)
 	if err != nil {
 		return nil, err
@@ -528,7 +528,7 @@ func get_filtered(obj, root interface{}, filter string) ([]interface{}, error) {
 
 			for i := 0; i < reflect.ValueOf(obj).Len(); i++ {
 				tmp := reflect.ValueOf(obj).Index(i).Interface()
-				ok, err := eval_reg_filter(tmp, root, lp, pat)
+				ok, err := eval_reg_filter(tmp, root, lp, pat, allowMissingKeys)
 				if err != nil {
 					return nil, err
 				}
@@ -539,7 +539,7 @@ func get_filtered(obj, root interface{}, filter string) ([]interface{}, error) {
 		} else {
 			for i := 0; i < reflect.ValueOf(obj).Len(); i++ {
 				tmp := reflect.ValueOf(obj).Index(i).Interface()
-				ok, err := eval_filter(tmp, root, lp, op, rp)
+				ok, err := eval_filter(tmp, root, lp, op, rp, allowMissingKeys)
 				if err != nil {
 					return nil, err
 				}
@@ -559,7 +559,7 @@ func get_filtered(obj, root interface{}, filter string) ([]interface{}, error) {
 
 			for _, kv := range reflect.ValueOf(obj).MapKeys() {
 				tmp := reflect.ValueOf(obj).MapIndex(kv).Interface()
-				ok, err := eval_reg_filter(tmp, root, lp, pat)
+				ok, err := eval_reg_filter(tmp, root, lp, pat, allowMissingKeys)
 				if err != nil {
 					return nil, err
 				}
@@ -570,7 +570,7 @@ func get_filtered(obj, root interface{}, filter string) ([]interface{}, error) {
 		} else {
 			for _, kv := range reflect.ValueOf(obj).MapKeys() {
 				tmp := reflect.ValueOf(obj).MapIndex(kv).Interface()
-				ok, err := eval_filter(tmp, root, lp, op, rp)
+				ok, err := eval_filter(tmp, root, lp, op, rp, allowMissingKeys)
 				if err != nil {
 					return nil, err
 				}
@@ -689,11 +689,11 @@ func parse_filter_v1(filter string) (lp string, op string, rp string, err error)
 	return lp, op, rp, err
 }
 
-func eval_reg_filter(obj, root interface{}, lp string, pat *regexp.Regexp) (res bool, err error) {
+func eval_reg_filter(obj, root interface{}, lp string, pat *regexp.Regexp, allowMissingKeys bool) (res bool, err error) {
 	if pat == nil {
 		return false, errors.New("nil pat")
 	}
-	lp_v, err := get_lp_v(obj, root, lp)
+	lp_v, err := get_lp_v(obj, root, lp, allowMissingKeys)
 	if err != nil {
 		return false, err
 	}
@@ -705,20 +705,20 @@ func eval_reg_filter(obj, root interface{}, lp string, pat *regexp.Regexp) (res 
 	}
 }
 
-func get_lp_v(obj, root interface{}, lp string) (interface{}, error) {
+func get_lp_v(obj, root interface{}, lp string, allowMissingKeys bool) (interface{}, error) {
 	var lp_v interface{}
 	if strings.HasPrefix(lp, "@.") {
-		return filter_get_from_explicit_path(obj, lp)
+		return filter_get_from_explicit_path(obj, lp, allowMissingKeys)
 	} else if strings.HasPrefix(lp, "$.") {
-		return filter_get_from_explicit_path(root, lp)
+		return filter_get_from_explicit_path(root, lp, allowMissingKeys)
 	} else {
 		lp_v = lp
 	}
 	return lp_v, nil
 }
 
-func eval_filter(obj, root interface{}, lp, op, rp string) (res bool, err error) {
-	lp_v, err := get_lp_v(obj, root, lp)
+func eval_filter(obj, root interface{}, lp, op, rp string, allowMissingKeys bool) (res bool, err error) {
+	lp_v, err := get_lp_v(obj, root, lp, allowMissingKeys)
 
 	if op == "exists" {
 		return lp_v != nil, nil
@@ -727,9 +727,9 @@ func eval_filter(obj, root interface{}, lp, op, rp string) (res bool, err error)
 	} else {
 		var rp_v interface{}
 		if strings.HasPrefix(rp, "@.") {
-			rp_v, err = filter_get_from_explicit_path(obj, rp)
+			rp_v, err = filter_get_from_explicit_path(obj, rp, allowMissingKeys)
 		} else if strings.HasPrefix(rp, "$.") || strings.HasPrefix(rp, "$[") {
-			rp_v, err = filter_get_from_explicit_path(root, rp)
+			rp_v, err = filter_get_from_explicit_path(root, rp, allowMissingKeys)
 		} else {
 			rp_v = rp
 		}
